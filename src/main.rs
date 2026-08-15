@@ -1,6 +1,8 @@
 use adw::prelude::*;
 use gtk::glib;
 
+mod widgets;
+
 fn main() -> glib::ExitCode {
     // Application ID uses reverse-DNS convention — org.example is a
     // placeholder; swap in your actual domain or io.github.<username>
@@ -17,8 +19,13 @@ fn main() -> glib::ExitCode {
             .default_height(600)
             .build();
 
-        let label = gtk::Label::new(Some("Rust scaffold — pipeline check"));
-        window.set_content(Some(&label));
+        // Temporary: exercise SkewedCard's public API end-to-end to
+        // confirm the widget actually constructs and behaves, not just
+        // type-checks in isolation.
+        let card = widgets::skewed_card::SkewedCard::new(200.0, 260.0, -12.0);
+        card.set_prominence(0.5);
+        card.set_selected(true);
+        window.set_content(Some(&card));
         window.present();
     });
 
