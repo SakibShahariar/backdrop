@@ -29,5 +29,13 @@ fn main() -> glib::ExitCode {
         window.present();
     });
 
-    app.run()
+    // run_with_args(&[]) instead of run() — Adw::Application::run()
+    // hands the process's real argv to GIO's own command-line handling
+    // by default, which tries to interpret our wallpaper-directory
+    // argument as a "file to open" (a GIO Application feature we never
+    // opted into), producing a GLib-GIO-CRITICAL warning. We already
+    // read the directory ourselves via std::env::args() above, so GIO's
+    // own arg parsing isn't needed at all — passing an empty slice here
+    // stops it from ever seeing the real argv.
+    app.run_with_args::<&str>(&[])
 }
