@@ -5,6 +5,9 @@
 
 use gtk::gio;
 use gtk::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::widgets::desktop_preview::DesktopPreview;
 use crate::widgets::skewed_card::SkewedCard;
@@ -64,6 +67,12 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
     selection.set_autoselect(false);
     selection.set_selected(gtk::INVALID_LIST_POSITION);
 
+    // Thumb cache for immediate low-res preview on arrow navigation
+    let thumb_cache: Rc<RefCell<HashMap<String, gtk::gdk::Texture>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    // Generation for preview debouncing (arrow hold → many selection_changed)
+    let preview_gen: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(move |_, item| {
         let list_item = item.downcast_ref::<gtk::ListItem>().unwrap();
@@ -72,30 +81,38 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
         card.set_valign(gtk::Align::Center);
         list_item.set_child(Some(&card));
     });
-    factory.connect_bind(move |_, item| {
-        let list_item = item.downcast_ref::<gtk::ListItem>().unwrap();
-        let string_obj = list_item.item().unwrap().downcast::<gtk::StringObject>().unwrap();
-        let path = string_obj.string().to_string();
-        let card = list_item.child().unwrap().downcast::<SkewedCard>().unwrap();
-        // Reset previous texture (recycled widget)
-        card.set_texture(None);
-        card.set_selected(list_item.is_selected());
-        let path_clone = path.clone();
-        let list_item_clone = list_item.clone();
-        thumbnail_loader::request(&path, {
-            let card = card.clone();
-            move |texture| {
-                // Only set if still bound to same path (check current item)
-                if let Some(current) = list_item_clone.item() {
-                    if let Some(cur_obj) = current.downcast_ref::<gtk::StringObject>() {
-                        if cur_obj.string() == path_clone {
-                            card.set_texture(texture);
+    {
+        let thumb_cache = thumb_cache.clone();
+        factory.connect_bind(move |_, item| {
+            let list_item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let string_obj = list_item.item().unwrap().downcast::<gtk::StringObject>().unwrap();
+            let path = string_obj.string().to_string();
+            let card = list_item.child().unwrap().downcast::<SkewedCard>().unwrap();
+            // Reset previous texture (recycled widget)
+            card.set_texture(None);
+            card.set_selected(list_item.is_selected());
+            let path_clone = path.clone();
+            let list_item_clone = list_item.clone();
+            let thumb_cache = thumb_cache.clone();
+            thumbnail_loader::request(&path, {
+                let card = card.clone();
+                move |texture| {
+                    // Cache thumb for immediate preview on next arrow
+                    if let Some(tex) = texture.clone() {
+                        thumb_cache.borrow_mut().insert(path_clone.clone(), tex);
+                    }
+                    // Only set if still bound to same path (check current item)
+                    if let Some(current) = list_item_clone.item() {
+                        if let Some(cur_obj) = current.downcast_ref::<gtk::StringObject>() {
+                            if cur_obj.string() == path_clone {
+                                card.set_texture(texture);
+                            }
                         }
                     }
                 }
-            }
+            });
         });
-    });
+    }
     factory.connect_unbind(move |_, item| {
         let list_item = item.downcast_ref::<gtk::ListItem>().unwrap();
         if let Some(child) = list_item.child() {
@@ -110,44 +127,73 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
     list_view.set_single_click_activate(true);
     list_view.add_css_class("wallpaper-list");
     // Remove ListView's default rounded selected row background — we draw our
-    // own angular border inside SkewedCard (skewed -12deg, sharp miter).
-    // Without this, ListView draws a rounded axis-aligned highlight that
-    // doesn't match the skewed cards (as seen in the screenshot).
+    // own angular border inside SkewedCard (3px, 0 radius, -12deg skew) as in
+    // prototype's skewed_card.py. Without this, ListView draws a rounded
+    // axis-aligned highlight with gap (screenshot: light purple rounded rect).
     let css = gtk::CssProvider::new();
     css.load_from_string(
-        "listview > row:selected { background: transparent; border: none; border-radius: 0; outline: none; box-shadow: none; } \
-         listview { background: transparent; } \
-         .wallpaper-list { background: transparent; }",
+        "listview > row:selected, listview row:selected, row:selected { background: transparent !important; border: none !important; border-radius: 0 !important; outline: none !important; box-shadow: none !important; } \
+         listview, .wallpaper-list, listview > row, row { background: transparent; border-radius: 0; }",
     );
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().unwrap(),
         &css,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        gtk::STYLE_PROVIDER_PRIORITY_USER,
     );
 
-    // Handle selection → preview (high-res) + card selected border
+    // Handle selection → preview (high-res) with immediate low-res from cache + debouncing
+    // Arrow hold fires many selection_changed; only the last preview should win.
     {
         let preview_sel = preview.clone();
+        let thumb_cache_sel = thumb_cache.clone();
+        let preview_gen_sel = preview_gen.clone();
         selection.connect_selection_changed(move |sel, _, _| {
             if let Some(selected) = sel.selected_item() {
                 if let Some(obj) = selected.downcast_ref::<gtk::StringObject>() {
                     let path = obj.string().to_string();
+                    // Immediate low-res thumb if already cached (no wait for 1920 decode)
+                    if let Some(cached) = thumb_cache_sel.borrow().get(&path).cloned() {
+                        preview_sel.set_texture(Some(cached));
+                    }
+                    // Debounced high-res
+                    let gen = {
+                        let mut g = preview_gen_sel.borrow_mut();
+                        *g += 1;
+                        *g
+                    };
                     let preview = preview_sel.clone();
+                    let preview_gen = preview_gen_sel.clone();
                     thumbnail_loader::request_preview(&path, move |texture| {
-                        preview.set_texture(texture)
+                        // Only apply if still the latest selection (arrow may have moved)
+                        if *preview_gen.borrow() == gen {
+                            preview.set_texture(texture);
+                        }
                     });
                 }
             }
         });
-        // Also handle activate (click)
+        // Also handle activate (click) — same immediate + high-res
         let preview_act = preview.clone();
+        let thumb_cache_act = thumb_cache.clone();
+        let preview_gen_act = preview_gen.clone();
         list_view.connect_activate(move |lv, pos| {
             if let Some(item) = lv.model().unwrap().item(pos) {
                 if let Some(obj) = item.downcast_ref::<gtk::StringObject>() {
                     let path = obj.string().to_string();
+                    if let Some(cached) = thumb_cache_act.borrow().get(&path).cloned() {
+                        preview_act.set_texture(Some(cached));
+                    }
+                    let gen = {
+                        let mut g = preview_gen_act.borrow_mut();
+                        *g += 1;
+                        *g
+                    };
                     let preview = preview_act.clone();
+                    let preview_gen = preview_gen_act.clone();
                     thumbnail_loader::request_preview(&path, move |texture| {
-                        preview.set_texture(texture)
+                        if *preview_gen.borrow() == gen {
+                            preview.set_texture(texture);
+                        }
                     });
                 }
             }
