@@ -5,6 +5,8 @@ mod layouts;
 mod widgets;
 
 fn main() -> glib::ExitCode {
+    eprintln!("[diag] main() started");
+
     // Application ID uses reverse-DNS convention — org.example is a
     // placeholder; swap in your actual domain or io.github.<username>
     // once you know where this will live permanently.
@@ -12,7 +14,11 @@ fn main() -> glib::ExitCode {
         .application_id("org.example.Backdrop")
         .build();
 
+    eprintln!("[diag] application built, connecting activate handler");
+
     app.connect_activate(|app| {
+        eprintln!("[diag] activate signal fired");
+
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Backdrop")
@@ -20,22 +26,32 @@ fn main() -> glib::ExitCode {
             .default_height(600)
             .build();
 
+        eprintln!("[diag] window built");
+
         let wallpaper_dir = std::env::args()
             .nth(1)
             .unwrap_or_else(|| "/usr/share/backgrounds".to_string());
 
+        eprintln!("[diag] scanning wallpaper dir: {wallpaper_dir}");
+
         let content = layouts::split_screen::build(&wallpaper_dir);
         window.set_content(Some(&content));
+
+        eprintln!("[diag] calling window.present()");
         window.present();
+        eprintln!("[diag] window.present() returned");
     });
 
-    // run_with_args(&[]) instead of run() — Adw::Application::run()
-    // hands the process's real argv to GIO's own command-line handling
-    // by default, which tries to interpret our wallpaper-directory
-    // argument as a "file to open" (a GIO Application feature we never
-    // opted into), producing a GLib-GIO-CRITICAL warning. We already
-    // read the directory ourselves via std::env::args() above, so GIO's
-    // own arg parsing isn't needed at all — passing an empty slice here
-    // stops it from ever seeing the real argv.
-    app.run_with_args::<&str>(&[])
+    eprintln!("[diag] calling app.run()");
+    // Passing only argv[0] (program name), not the full real argv —
+    // avoids GIO's file-open argument interpretation (which produced
+    // the GLib-GIO-CRITICAL warning) while still being a well-formed,
+    // non-empty args list, unlike the fully-empty array I tried before
+    // (which may itself have been malformed and silently broken
+    // activation — untested, hence the diagnostics above to find out
+    // for certain rather than guess again).
+    let program_name = std::env::args().next().unwrap_or_default();
+    let exit_code = app.run_with_args(&[program_name]);
+    eprintln!("[diag] app.run_with_args() returned: {exit_code:?}");
+    exit_code
 }
