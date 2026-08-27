@@ -143,20 +143,16 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
         gtk::STYLE_PROVIDER_PRIORITY_USER,
     );
 
-    // Handle selection → preview (high-res) with cache + debouncing + delayed low-res
-    // Arrow hold: only last preview wins. Show cached high-res immediately if
-    // available; otherwise show cached thumb only if high-res hasn't arrived
-    // within 120ms (avoids low-res flash when high-res is fast).
+    // Handle selection → preview (high-res always, no low-res flash)
+    // Arrow hold: only last preview wins. Cache high-res for instant revisit.
     {
         let preview_sel = preview.clone();
-        let thumb_cache_sel = thumb_cache.clone();
         let preview_cache_sel = preview_cache.clone();
         let preview_gen_sel = preview_gen.clone();
         selection.connect_selection_changed(move |sel, _, _| {
             if let Some(selected) = sel.selected_item() {
                 if let Some(obj) = selected.downcast_ref::<gtk::StringObject>() {
                     let path = obj.string().to_string();
-                    // If high-res already cached, show it immediately (no low-res flash)
                     if let Some(cached) = preview_cache_sel.borrow().get(&path).cloned() {
                         preview_sel.set_texture(Some(cached));
                         return;
@@ -166,22 +162,6 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
                         *g += 1;
                         *g
                     };
-                    // Schedule low-res fallback only if high-res is slow (120ms)
-                    let preview_low = preview_sel.clone();
-                    let thumb_cache_low = thumb_cache_sel.clone();
-                    let preview_gen_low = preview_gen_sel.clone();
-                    let path_low = path.clone();
-                    glib::timeout_add_local_once(
-                        std::time::Duration::from_millis(120),
-                        move || {
-                            if *preview_gen_low.borrow() == gen {
-                                if let Some(cached) = thumb_cache_low.borrow().get(&path_low).cloned() {
-                                    // Only if high-res still not set (still same gen)
-                                    preview_low.set_texture(Some(cached));
-                                }
-                            }
-                        },
-                    );
                     let preview = preview_sel.clone();
                     let preview_gen = preview_gen_sel.clone();
                     let preview_cache = preview_cache_sel.clone();
@@ -200,9 +180,8 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
                 }
             }
         });
-        // Also handle activate (click) — same logic
+        // Also handle activate (click) — same high-res only
         let preview_act = preview.clone();
-        let thumb_cache_act = thumb_cache.clone();
         let preview_cache_act = preview_cache.clone();
         let preview_gen_act = preview_gen.clone();
         list_view.connect_activate(move |lv, pos| {
@@ -218,20 +197,6 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
                         *g += 1;
                         *g
                     };
-                    let preview_low = preview_act.clone();
-                    let thumb_cache_low = thumb_cache_act.clone();
-                    let preview_gen_low = preview_gen_act.clone();
-                    let path_low = path.clone();
-                    glib::timeout_add_local_once(
-                        std::time::Duration::from_millis(120),
-                        move || {
-                            if *preview_gen_low.borrow() == gen {
-                                if let Some(cached) = thumb_cache_low.borrow().get(&path_low).cloned() {
-                                    preview_low.set_texture(Some(cached));
-                                }
-                            }
-                        },
-                    );
                     let preview = preview_act.clone();
                     let preview_gen = preview_gen_act.clone();
                     let preview_cache = preview_cache_act.clone();
@@ -252,34 +217,18 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
         });
     }
 
-    // Initial preview: first wallpaper high-res (no initial selection border)
+    // Initial preview: first wallpaper high-res (no initial selection border, no low-res flash)
     if let Some(first) = paths.first() {
         let preview_c = preview.clone();
         let first_for_preview = first.clone();
         let first_for_cache = first.clone();
         let preview_cache_init = preview_cache.clone();
-        let thumb_cache_init = thumb_cache.clone();
         let preview_gen_init = preview_gen.clone();
         let gen = {
             let mut g = preview_gen_init.borrow_mut();
             *g += 1;
             *g
         };
-        // Low-res fallback after 120ms if high-res not yet ready
-        let preview_low = preview_c.clone();
-        let thumb_cache_low = thumb_cache_init.clone();
-        let preview_gen_low = preview_gen_init.clone();
-        let first_low = first.clone();
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(120),
-            move || {
-                if *preview_gen_low.borrow() == gen {
-                    if let Some(cached) = thumb_cache_low.borrow().get(&first_low).cloned() {
-                        preview_low.set_texture(Some(cached));
-                    }
-                }
-            },
-        );
         let preview_cache_inner = preview_cache_init.clone();
         thumbnail_loader::request_preview(&first_for_preview, move |texture| {
             if *preview_gen_init.borrow() == gen {
