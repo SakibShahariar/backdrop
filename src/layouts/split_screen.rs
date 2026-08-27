@@ -138,15 +138,13 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
         });
     }
 
-    // Initial preview: first wallpaper high-res
+    // Initial preview: first wallpaper high-res (no initial selection border)
     if let Some(first) = paths.first() {
         let preview_c = preview.clone();
         let first = first.clone();
         thumbnail_loader::request_preview(&first, move |texture| {
             preview_c.set_texture(texture);
         });
-        // Select first item
-        selection.set_selected(0);
     }
 
     let scroller = gtk::ScrolledWindow::new();
