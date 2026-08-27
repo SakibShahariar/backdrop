@@ -9,7 +9,7 @@ use gtk::glib::Cast;
 use std::path::PathBuf;
 
 const THUMB_SIZE: u32 = 320;
-const PREVIEW_SIZE: u32 = 1920;
+const PREVIEW_SIZE: u32 = 1280;
 
 fn pixbuf_to_rgba(pixbuf: &Pixbuf) -> Option<(i32, i32, Vec<u8>)> {
     let width = pixbuf.width();
