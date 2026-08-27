@@ -109,6 +109,21 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
     list_view.set_orientation(gtk::Orientation::Horizontal);
     list_view.set_single_click_activate(true);
     list_view.add_css_class("wallpaper-list");
+    // Remove ListView's default rounded selected row background — we draw our
+    // own angular border inside SkewedCard (skewed -12deg, sharp miter).
+    // Without this, ListView draws a rounded axis-aligned highlight that
+    // doesn't match the skewed cards (as seen in the screenshot).
+    let css = gtk::CssProvider::new();
+    css.load_from_string(
+        "listview > row:selected { background: transparent; border: none; border-radius: 0; outline: none; box-shadow: none; } \
+         listview { background: transparent; } \
+         .wallpaper-list { background: transparent; }",
+    );
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().unwrap(),
+        &css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 
     // Handle selection → preview (high-res) + card selected border
     {
