@@ -164,10 +164,21 @@ mod imp {
             snapshot.pop(); // end the frame_rect clip
 
             if self.selected.get() {
+                // Angular border matching the skewed walls: drawn inside the
+                // outer (skewed) transform, so it traces the card's actual
+                // parallelogram outline. Inset by 1px and 2px width for a
+                // crisp, angular look that matches the -12deg skew.
                 let (r, g, b, a) = FALLBACK_ACCENT;
                 let accent = gdk::RGBA::new(r, g, b, a);
-                let border_rect = gsk::RoundedRect::from_rect(frame_rect, 0.0);
-                let border_width = 3.0;
+                let border_width = 2.0;
+                // Inset rect so border stays inside the skewed frame
+                let inset_rect = graphene::Rect::new(
+                    border_width / 2.0,
+                    border_width / 2.0,
+                    width - border_width,
+                    height - border_width,
+                );
+                let border_rect = gsk::RoundedRect::from_rect(inset_rect, 0.0);
                 snapshot.append_border(
                     &border_rect,
                     &[border_width; 4],
