@@ -1,103 +1,115 @@
-//! Async thumbnail loader — fast decode via gdk-pixbuf (libjpeg-turbo) +
-//! rayon pool, fallback to image crate. Two sizes: THUMB 320 for cards,
-//! PREVIEW 1920 for preview.
+//! Fast loader via gdk-pixbuf (libjpeg-turbo) + rayon, disk cache, preview pool.
+//! Prototype: THUMB 900 WebP cache, 100ms debounce, 3 concurrent.
 
 use gdk_pixbuf::Pixbuf;
 use gtk::gdk;
 use gtk::glib;
 use gtk::glib::Cast;
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const THUMB_SIZE: u32 = 320;
 const PREVIEW_SIZE: u32 = 1024;
 
+fn cache_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".cache/backdrop/thumbs")
+}
+fn supports_webp() -> bool {
+    static WEBP: OnceLock<bool> = OnceLock::new();
+    *WEBP.get_or_init(|| {
+        Pixbuf::formats()
+            .iter()
+            .any(|f| f.name().as_deref() == Some("webp"))
+    })
+}
+fn cache_path(source: &Path, size: u32) -> PathBuf {
+    let mtime = std::fs::metadata(source)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = format!("{}:{}:{}", source.display(), mtime, size);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let ext = if supports_webp() { "webp" } else { "png" };
+    cache_dir().join(format!("{:x}.{ext}", hasher.finish()))
+}
 fn pixbuf_to_rgba(pixbuf: &Pixbuf) -> Option<(i32, i32, Vec<u8>)> {
-    let width = pixbuf.width();
-    let height = pixbuf.height();
-    let rowstride = pixbuf.rowstride() as usize;
-    let n_channels = pixbuf.n_channels() as usize;
-    let has_alpha = pixbuf.has_alpha();
-    let pixels = unsafe { pixbuf.pixels() };
-
-    if has_alpha && n_channels == 4 {
-        // Already RGBA, but rowstride may be padded; repack tightly if needed
-        if rowstride == (width as usize * 4) {
-            Some((width, height, pixels.to_vec()))
+    let w = pixbuf.width();
+    let h = pixbuf.height();
+    let rs = pixbuf.rowstride() as usize;
+    let ch = pixbuf.n_channels() as usize;
+    let alpha = pixbuf.has_alpha();
+    let px = unsafe { pixbuf.pixels() };
+    if alpha && ch == 4 {
+        if rs == (w as usize * 4) {
+            Some((w, h, px.to_vec()))
         } else {
-            let mut tight = Vec::with_capacity((width * height * 4) as usize);
-            for y in 0..height as usize {
-                let start = y * rowstride;
-                let end = start + (width as usize * 4);
-                tight.extend_from_slice(&pixels[start..end]);
+            let mut v = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h as usize {
+                v.extend_from_slice(&px[y * rs..y * rs + (w as usize * 4)]);
             }
-            Some((width, height, tight))
+            Some((w, h, v))
         }
-    } else if !has_alpha && n_channels == 3 {
-        // RGB -> RGBA (add opaque alpha)
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height as usize {
-            let row_start = y * rowstride;
-            for x in 0..width as usize {
-                let off = row_start + x * 3;
-                rgba.push(pixels[off]);
-                rgba.push(pixels[off + 1]);
-                rgba.push(pixels[off + 2]);
-                rgba.push(255);
+    } else if !alpha && ch == 3 {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as usize {
+            let rs = y * rs;
+            for x in 0..w as usize {
+                let o = rs + x * 3;
+                rgba.extend_from_slice(&[px[o], px[o + 1], px[o + 2], 255]);
             }
         }
-        Some((width, height, rgba))
+        Some((w, h, rgba))
     } else {
         None
     }
 }
-
-fn decode_with_pixbuf(path: &PathBuf, size: u32) -> Option<(i32, i32, Vec<u8>)> {
-    // from_file_at_scale with preserve_aspect_ratio=true, scale to fit size×size
+fn decode_with_cache(path: &Path, size: u32) -> Option<(i32, i32, Vec<u8>)> {
+    let cpath = cache_path(path, size);
+    if cpath.exists() {
+        if let Ok(pb) = Pixbuf::from_file(&cpath) {
+            if let Some(rgba) = pixbuf_to_rgba(&pb) {
+                return Some(rgba);
+            }
+        }
+    }
     let pixbuf = Pixbuf::from_file_at_scale(path, size as i32, size as i32, true).ok()?;
-    pixbuf_to_rgba(&pixbuf)
+    let rgba = pixbuf_to_rgba(&pixbuf)?;
+    let _ = std::fs::create_dir_all(cache_dir());
+    let _ = pixbuf.savev(&cpath, if supports_webp() { "webp" } else { "png" }, &[]);
+    Some(rgba)
 }
-
-fn decode_with_image(path: &PathBuf, size: u32) -> Option<(i32, i32, Vec<u8>)> {
-    let img = image::open(path).ok()?;
-    let resized = img.thumbnail(size, size);
-    let rgba = resized.to_rgba8();
-    Some((rgba.width() as i32, rgba.height() as i32, rgba.into_raw()))
+fn decode_fallback(path: &Path, size: u32) -> Option<(i32, i32, Vec<u8>)> {
+    decode_with_cache(path, size).or_else(|| {
+        let img = image::open(path).ok()?;
+        let r = img.thumbnail(size, size);
+        let rgba = r.to_rgba8();
+        Some((rgba.width() as i32, rgba.height() as i32, rgba.into_raw()))
+    })
 }
-
-fn decode_and_send(path: PathBuf, size: u32, sender: async_channel::Sender<Option<(i32, i32, Vec<u8>)>>) {
-    // Try pixbuf first (fast, libjpeg-turbo), fallback to image crate
-    let decoded = decode_with_pixbuf(&path, size).or_else(|| decode_with_image(&path, size));
-    let _ = sender.send_blocking(decoded);
-}
-
 fn spawn_request(path: &str, size: u32, on_ready: impl Fn(Option<gdk::Texture>) + 'static) {
-    let path_buf = PathBuf::from(path);
-    let (sender, receiver) = async_channel::bounded(1);
-    rayon::spawn(move || decode_and_send(path_buf, size, sender));
+    let pb = PathBuf::from(path);
+    let (s, r) = async_channel::bounded(1);
+    rayon::spawn(move || {
+        let d = decode_fallback(&pb, size);
+        let _ = s.send_blocking(d);
+    });
     glib::spawn_future_local(async move {
-        let decoded_opt = receiver.recv().await.unwrap_or(None);
-        let texture = decoded_opt.map(|(width, height, rgba_bytes)| {
-            let bytes = glib::Bytes::from_owned(rgba_bytes);
-            let stride = width * 4;
-            gdk::MemoryTexture::new(
-                width,
-                height,
-                gdk::MemoryFormat::R8g8b8a8,
-                &bytes,
-                stride as usize,
-            )
-            .upcast::<gdk::Texture>()
+        let d = r.recv().await.unwrap_or(None);
+        let tex = d.map(|(w, h, b)| {
+            let bytes = glib::Bytes::from_owned(b);
+            gdk::MemoryTexture::new(w, h, gdk::MemoryFormat::R8g8b8a8, &bytes, (w * 4) as usize).upcast::<gdk::Texture>()
         });
-        on_ready(texture);
+        on_ready(tex);
     });
 }
-
-/// Thumbnail for cards (320px, fast, rayon pool)
 pub fn request(path: &str, on_ready: impl Fn(Option<gdk::Texture>) + 'static) {
     spawn_request(path, THUMB_SIZE, on_ready)
 }
-
-use std::sync::OnceLock;
 static PREVIEW_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 fn preview_pool() -> &'static rayon::ThreadPool {
     PREVIEW_POOL.get_or_init(|| {
@@ -108,26 +120,19 @@ fn preview_pool() -> &'static rayon::ThreadPool {
             .unwrap()
     })
 }
-
-/// High-res for preview (1024px, dedicated pool, not queued behind 320 thumbs)
 pub fn request_preview(path: &str, on_ready: impl Fn(Option<gdk::Texture>) + 'static) {
-    let path_buf = PathBuf::from(path);
-    let (sender, receiver) = async_channel::bounded(1);
-    preview_pool().spawn(move || decode_and_send(path_buf, PREVIEW_SIZE, sender));
+    let pb = PathBuf::from(path);
+    let (s, r) = async_channel::bounded(1);
+    preview_pool().spawn(move || {
+        let d = decode_fallback(&pb, PREVIEW_SIZE);
+        let _ = s.send_blocking(d);
+    });
     glib::spawn_future_local(async move {
-        let decoded_opt = receiver.recv().await.unwrap_or(None);
-        let texture = decoded_opt.map(|(width, height, rgba_bytes)| {
-            let bytes = glib::Bytes::from_owned(rgba_bytes);
-            let stride = width * 4;
-            gdk::MemoryTexture::new(
-                width,
-                height,
-                gdk::MemoryFormat::R8g8b8a8,
-                &bytes,
-                stride as usize,
-            )
-            .upcast::<gdk::Texture>()
+        let d = r.recv().await.unwrap_or(None);
+        let tex = d.map(|(w, h, b)| {
+            let bytes = glib::Bytes::from_owned(b);
+            gdk::MemoryTexture::new(w, h, gdk::MemoryFormat::R8g8b8a8, &bytes, (w * 4) as usize).upcast::<gdk::Texture>()
         });
-        on_ready(texture);
+        on_ready(tex);
     });
 }

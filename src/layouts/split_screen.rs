@@ -134,8 +134,8 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
     // axis-aligned highlight with gap (screenshot: light purple rounded rect).
     let css = gtk::CssProvider::new();
     css.load_from_string(
-        "listview > row:selected, listview row:selected, row:selected { background: transparent !important; border: none !important; border-radius: 0 !important; outline: none !important; box-shadow: none !important; } \
-         listview, .wallpaper-list, listview > row, row { background: transparent; border-radius: 0; }",
+        "listview > row:selected, listview row:selected, row:selected { background-color: transparent; border: none; border-radius: 0; outline: none; box-shadow: none; } \
+         listview, .wallpaper-list, listview > row, row { background-color: transparent; border-radius: 0; }",
     );
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().unwrap(),
