@@ -9,7 +9,7 @@ use gtk::glib::Cast;
 use std::path::PathBuf;
 
 const THUMB_SIZE: u32 = 320;
-const PREVIEW_SIZE: u32 = 1280;
+const PREVIEW_SIZE: u32 = 1024;
 
 fn pixbuf_to_rgba(pixbuf: &Pixbuf) -> Option<(i32, i32, Vec<u8>)> {
     let width = pixbuf.width();
@@ -92,12 +92,42 @@ fn spawn_request(path: &str, size: u32, on_ready: impl Fn(Option<gdk::Texture>) 
     });
 }
 
-/// Thumbnail for cards (320px, fast)
+/// Thumbnail for cards (320px, fast, rayon pool)
 pub fn request(path: &str, on_ready: impl Fn(Option<gdk::Texture>) + 'static) {
     spawn_request(path, THUMB_SIZE, on_ready)
 }
 
-/// High-res for preview (1920px)
+use std::sync::OnceLock;
+static PREVIEW_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+fn preview_pool() -> &'static rayon::ThreadPool {
+    PREVIEW_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .thread_name(|i| format!("preview-{i}"))
+            .build()
+            .unwrap()
+    })
+}
+
+/// High-res for preview (1024px, dedicated pool, not queued behind 320 thumbs)
 pub fn request_preview(path: &str, on_ready: impl Fn(Option<gdk::Texture>) + 'static) {
-    spawn_request(path, PREVIEW_SIZE, on_ready)
+    let path_buf = PathBuf::from(path);
+    let (sender, receiver) = async_channel::bounded(1);
+    preview_pool().spawn(move || decode_and_send(path_buf, PREVIEW_SIZE, sender));
+    glib::spawn_future_local(async move {
+        let decoded_opt = receiver.recv().await.unwrap_or(None);
+        let texture = decoded_opt.map(|(width, height, rgba_bytes)| {
+            let bytes = glib::Bytes::from_owned(rgba_bytes);
+            let stride = width * 4;
+            gdk::MemoryTexture::new(
+                width,
+                height,
+                gdk::MemoryFormat::R8g8b8a8,
+                &bytes,
+                stride as usize,
+            )
+            .upcast::<gdk::Texture>()
+        });
+        on_ready(texture);
+    });
 }
