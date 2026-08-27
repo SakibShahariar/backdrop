@@ -1,4 +1,5 @@
 use adw::prelude::*;
+use gtk::gdk;
 use gtk::glib;
 
 mod layouts;
@@ -36,6 +37,20 @@ fn main() -> glib::ExitCode {
 
         let content = layouts::split_screen::build(&wallpaper_dir);
         window.set_content(Some(&content));
+
+        // ESC to close
+        let key_ctl = gtk::EventControllerKey::new();
+        key_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let win_clone = window.clone();
+        key_ctl.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                win_clone.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(key_ctl);
 
         eprintln!("[diag] calling window.present()");
         window.present();
