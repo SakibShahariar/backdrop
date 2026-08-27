@@ -62,6 +62,7 @@ pub fn build(wallpaper_dir: &str) -> gtk::Widget {
     let selection = gtk::SingleSelection::new(Some(store));
     selection.set_can_unselect(true);
     selection.set_autoselect(false);
+    selection.set_selected(gtk::INVALID_LIST_POSITION);
 
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(move |_, item| {
